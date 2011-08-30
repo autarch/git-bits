@@ -1,0 +1,53 @@
+#!/usr/bin/env perl
+
+use strict;
+use warnings;
+use autodie qw( :all );
+
+use File::pushd;
+use File::Temp qw( tempdir );
+
+sub main {
+    for my $repo ( repos() ) {
+        my $dir = "/var/lib/git/repositories/$repo.git/hooks";
+        next unless -d $dir;
+
+        my $pr = "$dir/post-receive";
+        if ( -f $pr ) {
+            print "$repo already has a post-receive hook\n";
+            next;
+        }
+
+        print "Adding post-receive hook for $repo\n";
+
+        open my $fh, '>', $pr;
+        print {$fh} <<'EOF';
+#!/bin/sh
+
+/usr/local/bin/mirror-to-github --cwd `pwd`
+EOF
+        close $fh;
+
+        chmod 0744, $pr;
+    }
+}
+
+sub repos {
+    my $dir = pushd( tempdir( CLEANUP => 1 ) );
+
+    system(
+        'git', 'clone',
+        'file:///var/lib/git/repositories/gitolite-admin.git'
+    );
+
+    open my $fh, '<', 'gitolite-admin/conf/gitolite.conf';
+
+    my @repos;
+    while (<$fh>) {
+        push @repos, $1 if /\@public = (\S+)/;
+    }
+
+    return @repos;
+}
+
+main();
