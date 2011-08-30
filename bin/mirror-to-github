@@ -8,4 +8,4 @@ use lib "$Bin/../lib";
 
 use GitBits::Mirror;
 
-GitBits::Mirror->new_from_argv()->run();
+GitBits::Mirror->new_with_options()->run();

@@ -4,9 +4,13 @@ use Moose;
 use namespace::autoclean;
 use autodie qw( :all );
 
+use Cwd qw( abs_path );
+use File::Basename qw( basename );
 use Git::Wrapper;
 use Net::GitHub;
 use Sys::Hostname qw( hostname );
+
+with 'MooseX::Getopt::Dashes';
 
 has owner => (
     is      => 'ro',
@@ -29,13 +33,20 @@ has token => (
     builder => '_build_token',
 );
 
-has repo => (
+has cwd => (
     is       => 'ro',
     isa      => 'Str',
     required => 1,
 );
 
-has hostname => (
+has repo => (
+    is       => 'ro',
+    isa      => 'Str',
+    lazy    => 1,
+    builder => '_build_repo',
+);
+
+has _hostname => (
     is      => 'ro',
     isa     => 'Str',
     lazy    => 1,
@@ -44,15 +55,10 @@ has hostname => (
 
 has _github => (
     is       => 'ro',
-    isa      => 'Git::Wrapper',
+    isa      => 'Net::GitHub::V2',
     init_arg => undef,
     lazy     => 1,
-    default  => sub {
-        Net::GitHub->new(
-            owner => $self->owner(),
-            token => $self->token(),
-        );
-    },
+    builder  => '_build_github',
 );
 
 has _git => (
@@ -60,7 +66,7 @@ has _git => (
     isa      => 'Git::Wrapper',
     init_arg => undef,
     lazy     => 1,
-    default  => sub { Git::Wrapper->new() },
+    default  => sub { Git::Wrapper->new( $_[0]->cwd() ) },
 );
 
 sub run {
@@ -73,12 +79,13 @@ sub run {
 sub _maybe_create_repo {
     my $self = shift;
 
-    my $repo = $self->_github()->repos()->search( $self->repo() );
+    my %names
+        = map { $_->{name} => 1 } @{ $self->_github()->repos()->list() };
 
-    return if $repo && @{$repo} && defined $repo->[0]{name};
+    return if $names{ $self->repo() };
 
     $self->_out(
-        'Creating new ' . $self->repo() . " repository on github\n" );
+        'Creating new ' . $self->repo() . " repository on github" );
 
     $self->_github()->repos()->create(
         $self->repo(),
@@ -105,15 +112,14 @@ sub _push_all {
 sub _maybe_add_github_remote {
     my $self = shift;
 
-    my %remotes = map { chomp; $_ => 1 } split /\n/,
-        $self->_git()->remote('show');
+    my %remotes = map { $_ => 1 } $self->_git()->remote('show');
     return if $remotes{github};
 
     $self->_out('Adding github as new remote');
 
     $self->_git()
         ->remote( 'add', 'github',
-        'https://github.com/' . $self->owner() . '/' . $self->repo() );
+        'git@github.com:' . $self->owner() . '/' . $self->repo() . '.git' );
 
     return;
 }
@@ -130,30 +136,62 @@ sub _build_token {
     return $self->_git_config('github.token');
 }
 
-sub _build_hostname {
-    my $self = shift;
-
-    return hostname();
-}
-
 sub _git_config {
     my $self = shift;
     my $name = shift;
 
     my $value = `git config --global $name`;
 
-    die "Could not find a $name key in the global git config"
-        unless defined $value;
+    die "Could not find a $name key in the global git config\n"
+        unless defined $value && length $value;
 
     chomp $value;
 
     return $value;
 }
 
+sub _build_repo {
+    my $self = shift;
+
+    my $basename = basename( abs_path('.') );
+    $basename =~ s/\.git//;
+
+    return $basename;
+}
+
+sub _build_hostname {
+    my $self = shift;
+
+    return hostname();
+}
+
+sub _build_github {
+    my $self = shift;
+
+    return Net::GitHub->new(
+        owner => $self->owner(),
+        login => $self->owner(),
+        token => $self->token(),
+        repo  => $self->repo(),
+    );
+}
+
 sub _out {
     my $self = shift;
 
-    print @_;
+    print @_, "\n";
 }
 
 __PACKAGE__->meta()->make_immutable();
+
+1;
+
+#ABSTRACT: Post-receive hook to mirror a repo to github
+
+__END__
+
+Manual steps needed:
+
+* Set up keys on server side's git user
+* Make sure github host key is known by server side git user
+* Add post-receive hook
