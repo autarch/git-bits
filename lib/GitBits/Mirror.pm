@@ -87,11 +87,16 @@ sub _maybe_create_repo {
     $self->_out(
         'Creating new ' . $self->repo() . " repository on github" );
 
-    $self->_github()->repos()->create(
+    my $repo = $self->_github()->repos()->create(
         $self->repo(),
         'Mirror of ' . $self->repo() . ' on ' . $self->_hostname(),
         undef,
         1,
+    );
+
+    $repo->update(
+        has_wiki   => 0,
+        has_issues => 0,
     );
 
     return;
