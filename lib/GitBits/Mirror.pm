@@ -94,11 +94,6 @@ sub _maybe_create_repo {
         1,
     );
 
-    $repo->update(
-        has_wiki   => 0,
-        has_issues => 0,
-    );
-
     return;
 }
 
