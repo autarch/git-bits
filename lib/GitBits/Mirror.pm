@@ -7,8 +7,12 @@ use autodie qw( :all );
 use Cwd qw( abs_path );
 use File::Basename qw( basename );
 use Git::Wrapper;
-use Net::GitHub;
+use JSON::XS;
+use LWP::Protocol::https;
+use LWP::UserAgent;
+use MIME::Base64 qw( encode_base64 );
 use Sys::Hostname qw( hostname );
+use URI::FromHash qw( uri );
 
 with 'MooseX::Getopt::Dashes';
 
@@ -26,11 +30,11 @@ has login => (
     builder => '_build_login',
 );
 
-has token => (
+has password => (
     is      => 'ro',
     isa     => 'Str',
     lazy    => 1,
-    builder => '_build_token',
+    builder => '_build_password',
 );
 
 has cwd => (
@@ -53,12 +57,18 @@ has _hostname => (
     builder => '_build_hostname',
 );
 
-has _github => (
-    is       => 'ro',
-    isa      => 'Net::GitHub::V2',
-    init_arg => undef,
-    lazy     => 1,
-    builder  => '_build_github',
+has _ua => (
+    is      => 'ro',
+    isa     => 'LWP::UserAgent',
+    lazy    => 1,
+    builder => '_build_ua',
+);
+
+has _json => (
+    is      => 'ro',
+    isa     => 'JSON::XS',
+    lazy    => 1,
+    default => sub { JSON::XS->new()->utf8() },
 );
 
 has _git => (
@@ -79,22 +89,88 @@ sub run {
 sub _maybe_create_repo {
     my $self = shift;
 
-    my %names
-        = map { $_->{name} => 1 } @{ $self->_github()->repos()->list() };
+    my %names = map { $_->{name} => 1 } $self->_get_all_repos();
 
     return if $names{ $self->repo() };
 
     $self->_out(
         'Creating new ' . $self->repo() . " repository on github" );
 
-    my $repo = $self->_github()->repos()->create(
-        $self->repo(),
-        'Mirror of ' . $self->repo() . ' on ' . $self->_hostname(),
-        undef,
-        1,
+    my $resp = $self->_ua()->post(
+        $self->_uri('/user/repos'),
+        Content => $self->_json()->encode(
+            {
+                name        => $self->repo(),
+                description => 'Mirror of '
+                    . $self->repo() . ' on '
+                    . $self->_hostname(),
+                has_issues    => 0,
+                has_wiki      => 0,
+                has_downloads => 0,
+            }
+        ),
     );
 
+    $self->_maybe_handle_error($resp);
+
     return;
+}
+
+sub _get_all_repos {
+    my $self = shift;
+
+    my $uri = $self->_uri(
+        '/users/' . $self->owner() . '/repos',
+        { per_page => 100 },
+    );
+
+    my @repos;
+
+    while ($uri) {
+        my $resp = $self->_ua()->get($uri);
+        $self->_maybe_handle_error($resp);
+
+        push @repos, @{ $self->_json()->decode( $resp->content() ) };
+
+        my $next = $self->_find_next_page( $resp->header('Link') );
+        $uri = $next && $next ne $uri ? $next : undef;
+    }
+
+    return @repos;
+}
+
+sub _find_next_page {
+    my $self = shift;
+    my $header = shift;
+
+    return unless $header;
+
+    my %links;
+    for my $link ( split /\s*,\s*/, $header ) {
+        next unless $link =~ /<([^>]+)>;\s*rel="([^"]+)"/;
+        $links{$2} = $1;
+    }
+
+    return $links{next};
+}
+
+sub _maybe_handle_error {
+    my $self = shift;
+    my $resp = shift;
+
+    return if $resp->is_success();
+
+    my $body
+        = $resp->content()
+        ? $self->_json()->decode( $resp->content() )
+        : { message => 'no body' };
+
+    my $error = sprintf(
+        "Error from github (%s):\n%s", $resp->code(),
+        $body->{message}
+    );
+
+    die $error;
 }
 
 sub _push_all {
@@ -124,16 +200,35 @@ sub _maybe_add_github_remote {
     return;
 }
 
+sub _uri {
+    my $self  = shift;
+    my $path  = shift;
+    my $query = shift;
+
+    return uri(
+        scheme => 'https',
+        host   => 'api.github.com',
+        path   => $path,
+        query  => $query // {},
+    );
+}
+
 sub _build_owner {
     my $self = shift;
 
     return $self->_git_config('github.owner');
 }
 
-sub _build_token {
+sub _build_login {
     my $self = shift;
 
-    return $self->_git_config('github.token');
+    return $self->owner();
+}
+
+sub _build_password {
+    my $self = shift;
+
+    return $self->_git_config('github.password');
 }
 
 sub _git_config {
@@ -165,15 +260,15 @@ sub _build_hostname {
     return hostname();
 }
 
-sub _build_github {
+sub _build_ua {
     my $self = shift;
 
-    return Net::GitHub->new(
-        owner => $self->owner(),
-        login => $self->owner(),
-        token => $self->token(),
-        repo  => $self->repo(),
-    );
+    my $ua = LWP::UserAgent->new();
+
+    my $login = join ':', $self->login(), $self->password();
+    $ua->default_header( 'Authorization', 'Basic ' . encode_base64($login) );
+
+    return $ua;
 }
 
 sub _out {
