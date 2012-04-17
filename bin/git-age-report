@@ -9,7 +9,7 @@ my %age;
 for my $thing ( glob '*' ) {
     next if $thing =~ /^\.\.?$/;
 
-    my $epoch = `git log -1 --format="%at" $thing`;
+    my $epoch = `git log -1 --format="%at" ./$thing`;
     chomp $epoch;
 
     $thing .= '/' if -d $thing;
